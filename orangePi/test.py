@@ -369,6 +369,8 @@ def main():
     finally:
         ser_motors.close()
         ser_servos.close()
+        for line in lines.values():
+            line.release()
 
 if __name__ == "__main__":
     main()
