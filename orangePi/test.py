@@ -248,7 +248,38 @@ def send_msp(ser, command, data=[]):
     for d in data: checksum ^= d
     message = header + struct.pack('<BB', len(data), command) + bytes(data) + struct.pack('<B', checksum)
     ser.write(message)
+def read_msp(ser):
+    try:
+        header = ser.read(3)
+        if header != b'$M>':
+            return None
+        
+        len_data = ser.read(1)[0]
+        cmd = ser.read(1)[0]
+        data = ser.read(len_data)
+        checksum = ser.read(1)[0]
+        
+        calc_checksum = len_data ^ cmd
+        for d in data: calc_checksum ^= d
+        
+        if checksum == calc_checksum:
+            return (cmd, data)
+        return None
+    except:
+        return None
 
+def get_imu_data(ser):
+    # Solicitar datos de actitud (pitch/roll/yaw)
+    send_msp(ser, 108)  # MSP_ATTITUDE
+    response = read_msp(ser)
+    
+    if response and response[0] == 108:
+        data = response[1]
+        roll = struct.unpack('<h', data[0:2])[0] / 10.0  # en grados
+        pitch = struct.unpack('<h', data[2:4])[0] / 10.0
+        yaw = struct.unpack('<h', data[4:6])[0] / 10.0
+        return {"pitch": pitch, "roll": roll, "yaw": yaw}
+    return None
 # --- FUNCIONES DE VIDEO TCP ---
 def video_streamer():
     while True:
@@ -322,6 +353,7 @@ def main():
     global joystick_updated
     ser_motors = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=1)
     ser_servos = serial.Serial(UART_SERVO_PORT, BAUDRATE, timeout=1)
+    ser_imu = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=1)  # Conexión UART para IMU
 
      
     time.sleep(1)
@@ -340,6 +372,15 @@ def main():
         print("Control activo. Joystick para motores, botones 1-4 para servos.")
         print("Mantén botón para incrementar, doble-click+mantén para decrementar.")
         while True:
+                        # --- Leer y mostrar datos del IMU ---
+            imu_data = get_imu_data(ser_imu)
+            if imu_data:
+                print(
+                    f"\rPitch: {imu_data['pitch']:6.1f}° | "
+                    f"Roll: {imu_data['roll']:6.1f}° | "
+                    f"Yaw: {imu_data['yaw']:6.1f}°",
+                    end="", flush=True
+                )
             if joystick_updated:
                 if joystick_data["buttons"][8] == 1:  # Botón 9
                     if joystick_data["buttons"][9] == 1:  # Si también se presiona el botón RB (5)
