@@ -281,77 +281,41 @@ def get_imu_data(ser):
         return {"pitch": pitch, "roll": roll, "yaw": yaw}
     return None
 # --- FUNCIONES DE VIDEO TCP ---
-def camera_capture(camera_index, camera_path):
-    global latest_frame1, latest_frame2
-    cap = cv2.VideoCapture(camera_path)
-    if not cap.isOpened():
-        print(f"❌ Error grave: Cámara {camera_index} no detectada en {camera_path}")
-        return  
-    
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUCION[0])  
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUCION[1])
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print(f"Error en cámara {camera_index}. Reintentando...")
-            time.sleep(2)
-            continue
-        
-        with frame_lock:
-            if camera_index == 1:
-                latest_frame1 = frame
-            else:
-                latest_frame2 = frame
-
 def video_streamer():
-    global latest_frame1, latest_frame2
-    
-    # Inicia hilos para cámaras
-    cam_thread1 = Thread(target=camera_capture, args=(1, CAMERA_1), daemon=True)
-    cam_thread2 = Thread(target=camera_capture, args=(2, CAMERA_2), daemon=True)
-    cam_thread1.start()
-    cam_thread2.start()
-    
-    time.sleep(2)  # Espera inicialización
-    
     while True:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server_socket.settimeout(5.0)
-                server_socket.bind((TCP_VIDEO_IP, TCP_VIDEO_PORT))
-                server_socket.listen(1)
-                print("🔄 Servidor de video listo. Esperando conexión...")
-                
+            liberar_puertos()
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind((TCP_VIDEO_IP, TCP_VIDEO_PORT))
+            server_socket.listen(1)
+            print("Esperando conexión de video...")
+            conn, addr = server_socket.accept()
+            print(f"Conexión establecida con {addr}")
+            
+            cap = cv2.VideoCapture('/dev/video0')
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                data = pickle.dumps(cv2.resize(frame, (640, 480)))
                 try:
-                    conn, addr = server_socket.accept()
-                    print(f"✅ Cliente conectado: {addr}")
-                    
-                    while True:
-                        with frame_lock:
-                            if latest_frame1 is None or latest_frame2 is None:
-                                time.sleep(0.1)
-                                continue
-                                
-                            try:
-                                combined = cv2.hconcat([latest_frame1, latest_frame2])
-                                _, buffer = cv2.imencode('.jpg', combined, 
-                                                      [cv2.IMWRITE_JPEG_QUALITY, 70])
-                                data = pickle.dumps(buffer)
-                                conn.sendall(struct.pack("L", len(data)) + data)
-                            except Exception as e:
-                                print(f"⚠️ Error procesando frame: {e}")
-                                break
-                                
-                except socket.timeout:
-                    print("⏳ Timeout en accept(). Reintentando...")
-                    continue
+                    conn.sendall(struct.pack("L", len(data)) + data)
+                except (ConnectionResetError, BrokenPipeError):
+                    print("Cliente desconectado")
+                    break
                     
         except Exception as e:
-            print(f"❌ Error en servidor de video: {e}")
-            time.sleep(1)
+            print(f"Error en video: {e}. Reintentando en 5 segundos...")
+            time.sleep(5)
             
+        finally:
+            if 'cap' in locals(): cap.release()
+            if 'conn' in locals(): conn.close()
+            if 'server_socket' in locals(): server_socket.close()
+
 def liberar_puertos():
     # Libera puerto UDP
     subprocess.run(["fuser", "-k", f"{UDP_PORT}/udp"], stderr=subprocess.DEVNULL)
@@ -397,7 +361,7 @@ def main():
 
     Thread(target=udp_receiver, daemon=True).start()
 
-    Thread(target=video_streamer, daemon=True).start()  # <-- Nuevo sistema de 2 cámaras
+    Thread(target=video_streamer, daemon=True).start()
 
     control_thread = Thread(target=control_bombas, args=(lines,))
     control_thread.daemon = True

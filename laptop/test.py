@@ -54,71 +54,80 @@ def recibir_estado():
 # ---------- FUNCIÓN MEJORADA PARA VIDEO CON RECONEXIÓN ----------
 def recibir_video():
     retry_count = 0
-    last_frame_time = time.time()
+    status_data["connection_attempts"] += 1
     
     while retry_count < MAX_RETRIES:
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(10.0)
-
-            client_socket.connect((TCP_HOST, TCP_PORT))
-
-            if client_socket.fileno() == -1:  # <- Verifica conexión activa
-                raise ConnectionError("Socket no conectado")
+            client_socket.settimeout(5.0)
             
+            print(f"\n🔌 Intento de conexión #{status_data['connection_attempts']} a {TCP_HOST}:{TCP_PORT}...")
+            client_socket.connect((TCP_HOST, TCP_PORT))
+            
+            status_data["video_connected"] = True
+            status_data["connection_attempts"] = 0
             print("✅ Conexión de video establecida")
-            retry_count = 0
             
             data = b""
             payload_size = struct.calcsize("L")
-            fps_counter = 0
-            last_fps_time = time.time()
-            
-            cv2.namedWindow("Mosaico de Cámaras", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("Mosaico de Cámaras", 640, 240)
-            
+            retry_count = 0
+
             while True:
-                # Recibe datos
-                while len(data) < payload_size:
-                    data += client_socket.recv(BUFFER_SIZE)
-                
-                packed_size = data[:payload_size]
-                data = data[payload_size:]
-                msg_size = struct.unpack("L", packed_size)[0]
-                
-                while len(data) < msg_size:
-                    data += client_socket.recv(BUFFER_SIZE)
-                
-                frame_data = data[:msg_size]
-                data = data[msg_size:]
-                
-                # Decodifica frame
-                buffer = pickle.loads(frame_data)
-                frame = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
-                
-                # Calcula FPS
-                fps_counter += 1
-                if time.time() - last_fps_time >= 1.0:
-                    print(f"📊 FPS: {fps_counter}")
-                    fps_counter = 0
-                    last_fps_time = time.time()
-                
-                # Muestra frame
-                cv2.imshow("Mosaico de Cámaras", frame)
-                
-                if cv2.waitKey(1) == ord('q'):
-                    raise KeyboardInterrupt
-                
-        except (socket.timeout, ConnectionError) as e:
-            print(f"⚠️ Error: {str(e)}")
+                try:
+                    # Recepción de frames con timeout
+                    while len(data) < payload_size:
+                        chunk = client_socket.recv(BUFFER_SIZE)
+                        if not chunk:
+                            raise ConnectionError("Conexión cerrada por el servidor")
+                        data += chunk
+
+                    packed_msg_size = data[:payload_size]
+                    data = data[payload_size:]
+                    msg_size = struct.unpack("L", packed_msg_size)[0]
+
+                    while len(data) < msg_size:
+                        chunk = client_socket.recv(BUFFER_SIZE)
+                        if not chunk:
+                            raise ConnectionError("Conexión interrumpida")
+                        data += chunk
+
+                    frame_data = data[:msg_size]
+                    data = data[msg_size:]
+                    frame = pickle.loads(frame_data)
+                    
+                    # Mostrar ventana de video
+                    cv2.namedWindow("Video Stream - Orange Pi", cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow("Video Stream - Orange Pi", 640, 480)
+                    cv2.imshow("Video Stream - Orange Pi", frame)
+                    
+                    if cv2.waitKey(25) == ord('q'):
+                        video_restart_queue.put("exit")
+                        break
+
+                except (socket.timeout, ConnectionError) as e:
+                    print(f"⚠️ Error en video: {str(e)}")
+                    status_data["video_connected"] = False
+                    break
+
+        except Exception as e:
             retry_count += 1
+            status_data["connection_attempts"] += 1
+            print(f"❌ Fallo conexión video (Intento {retry_count}/{MAX_RETRIES}): {str(e)}")
+            
+            if retry_count >= MAX_RETRIES:
+                print(f"\n🔁 Máximos intentos alcanzados. Reiniciando cliente de video...")
+                status_data["connection_attempts"] = 0
+            
+            if 'client_socket' in locals():
+                client_socket.close()
             time.sleep(RETRY_DELAY)
-        except KeyboardInterrupt:
-            break
+            
         finally:
+            status_data["video_connected"] = False
+            if 'client_socket' in locals():
+                client_socket.close()
             cv2.destroyAllWindows()
-            client_socket.close() if 'client_socket' in locals() else None
-    
+
     video_restart_queue.put("restart")
 
 # ---------- FUNCIÓN PARA MOSTRAR ESTADO ----------
