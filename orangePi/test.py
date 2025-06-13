@@ -3,7 +3,7 @@ import time
 import struct
 import json
 import socket
-from threading import Thread
+from threading import Thread ,Lock
 from collections import defaultdict
 import cv2
 import pickle
@@ -23,6 +23,10 @@ UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 TCP_VIDEO_IP = '192.168.1.105'
 TCP_VIDEO_PORT = 12345
+CAMERA_1 = '/dev/video0'
+CAMERA_2 = '/dev/video1'
+RESOLUCION = (320, 240)
+
 
 # --- VARIABLES GLOBALES ---
 joystick_data = {
@@ -44,6 +48,12 @@ GPIO_MAPPING = {
     'BOMBA_LLENAR': {'chip': 'gpiochip1', 'offset': 3},   # GPIO35
     'BOMBA_VACIAR': {'chip': 'gpiochip2', 'offset': 28}, # GPIO92
 }
+
+# Camara
+latest_frame1 = None
+latest_frame2 = None
+frame_lock = Lock()
+
 
 # --- FUNCIONES DE CONTROL ---
 def setup_gpios():
@@ -271,40 +281,75 @@ def get_imu_data(ser):
         return {"pitch": pitch, "roll": roll, "yaw": yaw}
     return None
 # --- FUNCIONES DE VIDEO TCP ---
+def camera_capture(camera_index, camera_path):
+    global latest_frame1, latest_frame2
+    cap = cv2.VideoCapture(camera_path)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUCION[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUCION[1])
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print(f"Error en cámara {camera_index}. Reintentando...")
+            time.sleep(2)
+            continue
+        
+        with frame_lock:
+            if camera_index == 1:
+                latest_frame1 = frame
+            else:
+                latest_frame2 = frame
+
 def video_streamer():
+    global latest_frame1, latest_frame2
+    
+    # Inicia hilos para cada cámara
+    Thread(target=camera_capture, args=(1, CAMERA_1), daemon=True).start()
+    Thread(target=camera_capture, args=(2, CAMERA_2), daemon=True).start()
+    
+    time.sleep(2)  # Espera inicialización
+    
     while True:
         try:
-            liberar_puertos()
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_socket.bind((TCP_VIDEO_IP, TCP_VIDEO_PORT))
             server_socket.listen(1)
-            print("Esperando conexión de video...")
+            print("✅ Servidor de video listo")
             conn, addr = server_socket.accept()
-            print(f"Conexión establecida con {addr}")
-            
-            cap = cv2.VideoCapture('/dev/video0')
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            print(f"📹 Cliente conectado: {addr}")
             
             while True:
-                ret, frame = cap.read()
-                if not ret: break
-                data = pickle.dumps(cv2.resize(frame, (640, 480)))
-                try:
-                    conn.sendall(struct.pack("L", len(data)) + data)
-                except (ConnectionResetError, BrokenPipeError):
-                    print("Cliente desconectado")
-                    break
+                with frame_lock:
+                    if latest_frame1 is None or latest_frame2 is None:
+                        time.sleep(0.01)
+                        continue
                     
+                    # Combina frames
+                    combined = cv2.hconcat([latest_frame1, latest_frame2])
+                    
+                    # Añade etiquetas
+                    cv2.putText(combined, "Cámara 1", (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(combined, "Cámara 2", (RESOLUCION[0] + 10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Compresión JPEG (reduce ancho de banda)
+                    _, buffer = cv2.imencode('.jpg', combined, 
+                                           [cv2.IMWRITE_JPEG_QUALITY, 70])
+                
+                # Envía frame
+                data = pickle.dumps(buffer)
+                conn.sendall(struct.pack("L", len(data)) + data)
+                
+        except (ConnectionResetError, BrokenPipeError):
+            print("🔌 Cliente desconectado")
         except Exception as e:
-            print(f"Error en video: {e}. Reintentando en 5 segundos...")
-            time.sleep(5)
-            
+            print(f"❌ Error: {e}")
         finally:
-            if 'cap' in locals(): cap.release()
-            if 'conn' in locals(): conn.close()
-            if 'server_socket' in locals(): server_socket.close()
+            conn.close() if 'conn' in locals() else None
+            server_socket.close() if 'server_socket' in locals() else None
+            time.sleep(1)
 
 def liberar_puertos():
     # Libera puerto UDP
@@ -346,16 +391,18 @@ def main():
     ser_imu = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=0.02)  # Conexión UART para IMU
 
      
-    time.sleep(1)
        # Inicialización
     lines = setup_gpios()
 
     Thread(target=udp_receiver, daemon=True).start()
-    Thread(target=video_streamer, daemon=True).start()
+
+    Thread(target=video_streamer, daemon=True).start()  # <-- Nuevo sistema de 2 cámaras
+
     control_thread = Thread(target=control_bombas, args=(lines,))
     control_thread.daemon = True
     control_thread.start()
     send_msp(ser_motors, 216, [1])  # MSP_SET_ARMING
+    
     time.sleep(1)
 
     try:
