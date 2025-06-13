@@ -32,7 +32,9 @@ joystick_data = {
 }
 joystick_updated = False
 
-servo_positions = [1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,]
+servo_positions = [1400,1400,1400,1400,
+                   1400,1400,1400,1400,
+                   1400,1400]
 
 button_states = defaultdict(lambda: {'pressed': False, 'press_count': 0, 'last_press_time': 0})
 
@@ -80,9 +82,6 @@ def map_joystick(value, in_min, in_max, out_min, out_max):
     return int((value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 
 def calculate_motor_values(axes):
-    # eje_x, eje_y = axes[0], axes[1]
-    # if abs(eje_x) < 0.1: eje_x = 0
-    # if abs(eje_y) < 0.1: eje_y = 0
 
     m1= m2= m3 =m4 = 1000
       # # --HATs ---
@@ -125,6 +124,11 @@ def calculate_motor_values(axes):
     
         pass
 
+    # Se le agrega este codigo para que los motores funcionen con el joystick 
+
+    # eje_x, eje_y = axes[0], axes[1]
+    # if abs(eje_x) < 0.1: eje_x = 0
+    # if abs(eje_y) < 0.1: eje_y = 0
     # if eje_x != 0 or eje_y != 0:
     #         # Movimiento adelante/atrás (eje Y)
     #     if eje_y < 0:  # Adelante (joystick hacia arriba)
@@ -165,32 +169,25 @@ def update_servo_positions():
 
     current_time = time.time()
 
-    # --- LÍMITES PERSONALIZADOS POR GRUPO ---
+    #  Configuracion de limites 
     limits_by_index = {
         0: (700, 2100),  # Servo 1
         1: (500, 2500),  # Servo 2
         2: (500, 2500),  # Servo 3
         3: (500, 2500),  # Servo 4
-        4: (500, 2500),  # Servo 1
-        5: (500, 2500),  # Servo 2
-        6: (500, 2500),  # Servo 3
-        7: (500, 2500),  # Servo 4
-        8: (500, 2500),  # ✅ agregado para Servo 9
-        9: (500, 2500),  # ✅ agregado para Servo 10
+        #4: (500, 2500),  # Servo 5
+        #5: (500, 2500),  # Servo 6
+        #6: (500, 2500),  # Servo 7
+        #7: (500, 2500),  # Servo 8
+        8: (500, 2500),  # Servo 9
+        9: (500, 2500),  # Servo 10
 
     }
 
-    # --- Dirección modificada por botón RB (6) y LB (5) ---
+    # Inversion botones 
     invert_buttons = 1 if joystick_data["buttons"][5] else 0  # RB
-    invert_hats = 1 if joystick_data["buttons"][4] else 0     # LB
 
-        # Evita conflicto: si ambos están presionados, anula inversión
-    if invert_buttons and joystick_data["buttons"][4]:
-        invert_buttons = 0
-    if invert_hats and joystick_data["buttons"][5]:
-        invert_hats = 0
-
-    # --- Servos 1–4 con botones 0–3 ---
+    # Control de servos 
     for i in range(4):
         if joystick_data['buttons'][i]:
             direction = -1 if invert_buttons else 1
@@ -198,7 +195,18 @@ def update_servo_positions():
             min_limit, max_limit = limits_by_index[i]
             servo_positions[i] = max(min_limit, min(max_limit, new_pos))
 
-    # # --- Servos 5–8 con HATs ---
+    # --- Servos 9 y 10 con gatillos analógicos (ejes 3 y 6) ---
+        eje_2 = joystick_data["axes"][2] if len(joystick_data["axes"]) > 2 else -1
+        eje_5 = joystick_data["axes"][5] if len(joystick_data["axes"]) > 5 else -1
+
+
+    servo_positions_9_10 = [
+        map_joystick(eje_2, -1, 1, 500, 2500),
+        map_joystick(eje_5, -1, 1, 500, 2500)
+    ]
+
+
+        # # --- Servos 5–8 con HATs --- Agregar 
     # hat = tuple(joystick_data.get("hats", [(0, 0)])[0])
     # hat_mappings = {
     #     (1, 0): 4,    # Derecha → Servo 5  → índice 4
@@ -214,24 +222,6 @@ def update_servo_positions():
     #         new_pos = servo_positions[servo_index] + (50 * direction)
     #         min_limit, max_limit = limits_by_index[servo_index]
     #         servo_positions[servo_index] = max(min_limit, min(max_limit, new_pos))
-
-    # --- Servos 9 y 10 con gatillos analógicos (ejes 3 y 6) ---
-        eje_2 = joystick_data["axes"][2] if len(joystick_data["axes"]) > 2 else -1
-        eje_5 = joystick_data["axes"][5] if len(joystick_data["axes"]) > 5 else -1
-
-
-    servo_positions_9_10 = [
-        map_joystick(eje_2, -1, 1, 500, 2500),
-        map_joystick(eje_5, -1, 1, 500, 2500)
-    ]
-
-    # Si tu placa soporta más de 8 servos, agrégalos
-    if len(servo_positions) < 10:
-        servo_positions.extend([1500, 1500])
-
-    servo_positions[8] = servo_positions_9_10[0]
-    servo_positions[9] = servo_positions_9_10[1]
-
 
 
 def send_servo_commands(ser):
@@ -351,9 +341,9 @@ def control_bombas(lines):
 # --- FUNCIÓN PRINCIPAL ---
 def main():
     global joystick_updated
-    ser_motors = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=1)
-    ser_servos = serial.Serial(UART_SERVO_PORT, BAUDRATE, timeout=1)
-    ser_imu = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=1)  # Conexión UART para IMU
+    ser_motors = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=0.02)
+    ser_servos = serial.Serial(UART_SERVO_PORT, BAUDRATE, timeout=0.02)
+    ser_imu = serial.Serial(UART_MOTOR_PORT, BAUDRATE, timeout=0.02)  # Conexión UART para IMU
 
      
     time.sleep(1)
