@@ -60,7 +60,12 @@ def recibir_video():
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client_socket.settimeout(10.0)
+
             client_socket.connect((TCP_HOST, TCP_PORT))
+
+            if client_socket.fileno() == -1:  # <- Verifica conexión activa
+                raise ConnectionError("Socket no conectado")
+            
             print("✅ Conexión de video establecida")
             retry_count = 0
             
@@ -115,7 +120,7 @@ def recibir_video():
             client_socket.close() if 'client_socket' in locals() else None
     
     video_restart_queue.put("restart")
-    
+
 # ---------- FUNCIÓN PARA MOSTRAR ESTADO ----------
 def mostrar_estado():
     last_clean_time = time.time()
