@@ -8,7 +8,6 @@ import struct
 import cv2
 from queue import Queue
 import signal
-import textwrap
 from datetime import datetime
 
 # ---------- CONFIGURACIÓN ----------
@@ -16,9 +15,11 @@ UDP_IP = "192.168.1.105"  # IP Orange Pi
 UDP_PORT = 5005
 TCP_HOST = "192.168.1.105"
 TCP_PORT = 12345
-BUFFER_SIZE = 4096
-MAX_RETRIES = 5
-RETRY_DELAY = 3
+BUFFER_SIZE = 131072  # Aumentado para manejar dos streams de video
+MAX_RETRIES = 10
+RETRY_DELAY = 4
+WINDOW_WIDTH = 640
+WINDOW_HEIGHT = 480
 
 # ---------- VARIABLES GLOBALES ----------
 status_data = {
@@ -28,7 +29,8 @@ status_data = {
     "joystick": {"axes": [0.0]*8, "buttons": [0]*12, "hats": [(0,0)]},
     "last_update": time.time(),
     "video_connected": False,
-    "connection_attempts": 0
+    "connection_attempts": 0,
+    "fps": 0
 }
 
 # ---------- COLAS PARA COMUNICACIÓN ----------
@@ -51,10 +53,20 @@ def recibir_estado():
             print(f"⚠️ Error recibiendo estado: {str(e)}")
             time.sleep(1)
 
-# ---------- FUNCIÓN MEJORADA PARA VIDEO CON RECONEXIÓN ----------
+# ---------- FUNCIÓN MEJORADA PARA VIDEO CON DOS CÁMARAS ----------
+
 def recibir_video():
     retry_count = 0
     status_data["connection_attempts"] += 1
+    
+    # Configurar ventanas desde el inicio
+    cv2.namedWindow("Cámara 1 - Vista Frontal", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Cámara 1 - Vista Frontal", WINDOW_WIDTH, WINDOW_HEIGHT)
+    cv2.moveWindow("Cámara 1 - Vista Frontal", 50, 100)
+    
+    cv2.namedWindow("Cámara 2 - Vista Trasera", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Cámara 2 - Vista Trasera", WINDOW_WIDTH, WINDOW_HEIGHT)
+    cv2.moveWindow("Cámara 2 - Vista Trasera", WINDOW_WIDTH + 100, 100)
     
     while retry_count < MAX_RETRIES:
         try:
@@ -69,65 +81,63 @@ def recibir_video():
             print("✅ Conexión de video establecida")
             
             data = b""
-            payload_size = struct.calcsize("L")
-            retry_count = 0
-
+            payload_size = struct.calcsize("Q")
+            
             while True:
                 try:
-                    # Recepción de frames con timeout
+                    # Recepción de datos
                     while len(data) < payload_size:
-                        chunk = client_socket.recv(BUFFER_SIZE)
-                        if not chunk:
+                        packet = client_socket.recv(4096)
+                        if not packet:
                             raise ConnectionError("Conexión cerrada por el servidor")
-                        data += chunk
-
+                        data += packet
+                    
                     packed_msg_size = data[:payload_size]
                     data = data[payload_size:]
-                    msg_size = struct.unpack("L", packed_msg_size)[0]
-
+                    msg_size = struct.unpack("Q", packed_msg_size)[0]
+                    
                     while len(data) < msg_size:
-                        chunk = client_socket.recv(BUFFER_SIZE)
-                        if not chunk:
+                        packet = client_socket.recv(4096)
+                        if not packet:
                             raise ConnectionError("Conexión interrumpida")
-                        data += chunk
-
+                        data += packet
+                    
                     frame_data = data[:msg_size]
                     data = data[msg_size:]
-                    frame = pickle.loads(frame_data)
                     
-                    # Mostrar ventana de video
-                    cv2.namedWindow("Video Stream - Orange Pi", cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow("Video Stream - Orange Pi", 640, 480)
-                    cv2.imshow("Video Stream - Orange Pi", frame)
+                    try:
+                        received = pickle.loads(frame_data)
+                        frame1 = received.get('cam1')
+                        frame2 = received.get('cam2')
+                        
+                        if frame1 is not None and frame2 is not None:
+                            cv2.imshow("Cámara 1 - Vista Frontal", frame1)
+                            cv2.imshow("Cámara 2 - Vista Trasera", frame2)
+                        else:
+                            print("⚠️ Frame nulo recibido")
+                            
+                        if cv2.waitKey(25) & 0xFF == ord('q'):
+                            video_restart_queue.put("exit")
+                            break
+                            
+                    except Exception as e:
+                        print(f"⚠️ Error procesando frame: {str(e)}")
+                        
+                except socket.timeout:
+                    print("⚠️ Timeout en recepción de datos")
+                    continue
                     
-                    if cv2.waitKey(25) == ord('q'):
-                        video_restart_queue.put("exit")
-                        break
-
-                except (socket.timeout, ConnectionError) as e:
-                    print(f"⚠️ Error en video: {str(e)}")
-                    status_data["video_connected"] = False
-                    break
-
         except Exception as e:
             retry_count += 1
             status_data["connection_attempts"] += 1
             print(f"❌ Fallo conexión video (Intento {retry_count}/{MAX_RETRIES}): {str(e)}")
-            
-            if retry_count >= MAX_RETRIES:
-                print(f"\n🔁 Máximos intentos alcanzados. Reiniciando cliente de video...")
-                status_data["connection_attempts"] = 0
-            
-            if 'client_socket' in locals():
-                client_socket.close()
             time.sleep(RETRY_DELAY)
             
         finally:
             status_data["video_connected"] = False
             if 'client_socket' in locals():
                 client_socket.close()
-            cv2.destroyAllWindows()
-
+                
     video_restart_queue.put("restart")
 
 # ---------- FUNCIÓN PARA MOSTRAR ESTADO ----------
@@ -152,6 +162,7 @@ def mostrar_estado():
             # Estado de conexión
             connection_status = "✅ CONECTADO" if status_data["video_connected"] else f"⚠️ RECONECTANDO (Intento {status_data['connection_attempts']})"
             print(f"\n🔗 Estado Conexión: {connection_status}")
+            print(f"📷 Cámaras: 1-Frontal | 2-Trasera | FPS: {status_data['fps']}")
             
             # Mostrar datos de estado
             print("\n💨 MOTORES:")
@@ -178,6 +189,7 @@ def mostrar_estado():
             print("Controles:".center(80))
             print("ABXY → Servos 1-4 | LB → Invertir | RT/LT → Servos 9-10".center(80))
             print("HAT → Motores | Botones 7/8 → Bombas | 9+RB → Reinicio".center(80))
+            print("q → Salir | f → Pantalla completa".center(80))
             print("="*80)
         
         time.sleep(0.1)
@@ -233,6 +245,7 @@ def handler(signum, frame):
     print("\n🔌 Cerrando conexiones...")
     video_restart_queue.put("exit")
     cv2.destroyAllWindows()
+    pygame.quit()
     raise SystemExit
 
 signal.signal(signal.SIGINT, handler)
